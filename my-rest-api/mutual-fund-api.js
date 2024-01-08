@@ -1,9 +1,14 @@
+// Change the primary key of mutual fund table to ISIN
+// Change the foreign key of navdata table to ISINkey
+
+
 // Import required modules
 const express = require('express');
 const mysql = require('mysql');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cron = require('node-cron');
+const moment = require('moment');
 
 // Create an instance of the Express application
 const app = express();
@@ -28,14 +33,25 @@ db.connect(err => {
 });
 
 
-// Create the table if it doesn't exist
-const createTableSql = 'CREATE TABLE IF NOT EXISTS navdata (NAV VARCHAR(255), DATE VARCHAR(255))';
-db.query(createTableSql, function(err, result) {
+// Create mutual fund table
+const createMutualFundTableSql = 'CREATE TABLE IF NOT EXISTS mutualfund (mfID INT PRIMARY KEY, mfName VARCHAR(255), scID INT, scName VARCHAR(255), ISIN VARCHAR(255), lastUpdated DATE)';
+db.query(createMutualFundTableSql, function(err, result) {
   if (err) {
     console.error('MySQL create query error:', err);
     process.exit(1); // Exit the application if there is an error creating the table
   }
-  console.log('Table created successfully.');
+  console.log('Mutual Fund table created successfully.');
+});
+
+
+// Create navdata table
+const createNavDataTableSql = 'CREATE TABLE IF NOT EXISTS navdata (sNo INT PRIMARY KEY, NAV VARCHAR(255), date VARCHAR(255), mutualFundID INT, FOREIGN KEY (mutualFundID) REFERENCES mutualfund(mfID))';
+db.query(createNavDataTableSql, function(err, result) {
+  if (err) {
+    console.error('MySQL create query error:', err);
+    process.exit(1); // Exit the application if there is an error creating the table
+  }
+  console.log('Nav Data table created successfully.');
 });
 
 
@@ -50,7 +66,7 @@ app.get('/:mfId/:scId/:fdate/:tdate', async (req, res) => {
     const tdate = req.params.tdate; // Date range - To date
 
     const url = 'https://www.amfiindia.com/modules/NavHistoryPeriod';
-    const headers = {
+    const headers = { 
       'Accept': '*/*', 
       'Accept-Language': 'en-US,en;q=0.9', 
       'Connection': 'keep-alive', 
@@ -94,7 +110,7 @@ app.get('/:mfId/:scId/:fdate/:tdate', async (req, res) => {
         }
       });
 
-      await insertData(tdValues);
+      await insertData(tdValues, mfId);
 
       // Retrieve values from database
       const selectSql = 'SELECT * FROM navdata';
@@ -103,7 +119,7 @@ app.get('/:mfId/:scId/:fdate/:tdate', async (req, res) => {
           console.error('MySQL select query error:', err);
           res.status(500).json({ error: 'Internal Server Error' });
         } else {
-          console.log('Existing values retrieved successfully:');
+          console.log('Existing values retrieved successfully');
           console.log(result);
           if (!res.headersSent) {
             res.json(result);
@@ -120,14 +136,16 @@ app.get('/:mfId/:scId/:fdate/:tdate', async (req, res) => {
   }
 });
 
+
 // Function to insert missing rows into the database
-async function insertData(rows) {
+async function insertData(rows, mfId) {
   try {
 
-    // Delete the rows first so that new data can be inserted
-    const deleteSql = 'DELETE FROM navdata';
     await new Promise((resolve, reject) => {
-      db.query(deleteSql, function (err, result) {
+
+      // Delete the rows first so that new data can be inserted
+      const deleteSql = 'DELETE FROM navdata WHERE mutualFundID = ?';
+      db.query(deleteSql, [mfId], function (err, result) {
         if (err) {
           console.error('MySQL delete query error:', err);
           reject(err);
@@ -136,25 +154,61 @@ async function insertData(rows) {
           resolve();
         }
       });
+
     });
 
-    const insertSql = 'INSERT INTO navdata (NAV, DATE) VALUES ?';
-    const formattedRows = rows.map((row) => [parseFloat(row[0]), row[1]]); // Formatted into an array of 2 elements - NAV, DATE
+    const insertSql = 'INSERT INTO navdata (sNo, NAV, date, mutualFundID) VALUES ?';
+    const formattedRows = rows.map((row, index) => [index + 1, parseFloat(row[0]), row[1], mfId]); // Manually increment sNo starting from 1
+
     await new Promise((resolve, reject) => {
-      db.query(insertSql, [formattedRows], function (err, result) {
+      const checkSql = 'SELECT lastUpdated FROM mutualfund WHERE mfID = ?';
+      db.query(checkSql, [mfId], function (err, result) {
         if (err) {
-          console.error('MySQL insert query error:', err);
+          console.error('MySQL select query error:', err);
           reject(err);
         } else {
-          console.log('Inserted successfully.');
-          resolve();
+
+          const lastUpdated = moment(result[0].lastUpdated).format('YYYY-MM-DD'); // Get the last updated date value from the mutual fund table
+          const currentDate = new Date().toISOString().split('T')[0]; // Get the current date in YYYY-MM-DD format
+          console.log(lastUpdated, currentDate);
+
+          if (lastUpdated === currentDate) {
+            console.log('Data already up to date. Skipping insertion.');
+            resolve(); // Define the resolve function here
+          } else {
+
+            // Perform the insertion operation
+            db.query(insertSql, [formattedRows], function (err, result) {
+              if (err) {
+                console.error('MySQL insert query error:', err);
+                reject(err);
+              } else {
+                console.log('Inserted successfully.');
+
+                // Update the mutualfund table after navdata insertion
+                const updateSql = 'UPDATE mutualfund SET lastUpdated = DATE(NOW()) WHERE mfID = ?';
+                db.query(updateSql, [mfId], function (err, result) {
+                  if (err) {
+                    console.error('MySQL update query error:', err);
+                    reject(err);
+                  } else {
+                    console.log('lastUpdated column updated successfully.');
+                    resolve(); // Use the resolve function here
+                  }
+                });
+                resolve(); // Use the resolve function here
+              }
+            });
+          }
         }
       });
     });
+
   } catch (error) {
     throw error;
   }
 }
+
 
 // Start the server
 const server = app.listen(3000, () => {
