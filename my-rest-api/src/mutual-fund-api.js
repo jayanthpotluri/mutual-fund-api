@@ -86,7 +86,7 @@ app.get('/:mfId/:scId/:fdate/:tdate', async (req, res) => {
     };
 
     // Executes every 2 seconds
-    cron.schedule('*/2 * * * * *',async()=>{
+    cron.schedule('*/10 * * * * *',async()=>{
       const data = `mfID=${mfId}&scID=${scId}&fDate=${fdate}&tDate=${tdate}`; // Building the request
 
       const response = await axios.post(url, data, { headers }); // Posting the request
